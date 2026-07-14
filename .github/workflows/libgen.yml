@@ -1,0 +1,86 @@
+name: LibGen 搜书下载
+
+on:
+  repository_dispatch:
+    types: [search_book]
+  workflow_dispatch:
+    inputs:
+      query:
+        description: "搜索关键词"
+        required: true
+        default: ""
+      format:
+        description: "格式过滤 (pdf/epub/mobi)"
+        required: false
+        default: ""
+      download_index:
+        description: "下载第几个结果 (1=第一个)"
+        required: false
+        default: "1"
+      result_limit:
+        description: "搜索结果数量"
+        required: false
+        default: "10"
+
+env:
+  BOOK_QUERY: ${{ github.event.client_payload.query || github.event.inputs.query }}
+  BOOK_FORMAT: ${{ github.event.client_payload.format || github.event.inputs.format }}
+  DOWNLOAD_INDEX: ${{ github.event.client_payload.download_index || github.event.inputs.download_index || '1' }}
+  RESULT_LIMIT: ${{ github.event.client_payload.result_limit || github.event.inputs.result_limit || '10' }}
+
+jobs:
+  search_and_download:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 搜索 LibGen
+        id: search
+        run: |
+          python3 scripts/libgen_search.py search "$BOOK_QUERY" \
+            --format "$BOOK_FORMAT" \
+            --limit "$RESULT_LIMIT" > results.json
+          cat results.json
+
+      - name: 选择下载目标
+        id: select
+        run: |
+          python3 -c "
+          import json
+          with open('results.json') as f:
+              data = json.load(f)
+          idx = int('${{ env.DOWNLOAD_INDEX }}') - 1
+          if data['results'] and 0 <= idx < len(data['results']):
+              target = data['results'][idx]
+              print(f'MD5={target[\"md5\"]}')
+              print(f'TITLE={target[\"title\"]}')
+              with open('target_info.json', 'w') as f:
+                  json.dump(target, f)
+          else:
+              print('ERROR=未找到结果')
+              exit(1)
+          " >> $GITHUB_OUTPUT
+
+      - name: 下载文件
+        id: download
+        run: |
+          mkdir -p downloads
+          python3 scripts/libgen_search.py dl "${{ steps.select.outputs.MD5 }}" downloads/
+
+      - name: 保存搜索结果 JSON
+        run: |
+          cp results.json downloads/results.json
+          cp target_info.json downloads/target_info.json
+
+      - name: 上传 Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libgen-books
+          path: downloads/
+          retention-days: 7
