@@ -24,7 +24,7 @@ on:
 
 env:
   BOOK_QUERY: ${{ github.event.client_payload.query || github.event.inputs.query }}
-  BOOK_FORMAT: ${{ github.event.client_payload.format || github.event.inputs.format }}
+  BOOK_FORMAT: ${{ github.event.client_payload.format || github.event.inputs.format || '' }}
   DOWNLOAD_INDEX: ${{ github.event.client_payload.download_index || github.event.inputs.download_index || '1' }}
   RESULT_LIMIT: ${{ github.event.client_payload.result_limit || github.event.inputs.result_limit || '10' }}
 
@@ -47,36 +47,64 @@ jobs:
             --format "$BOOK_FORMAT" \
             --limit "$RESULT_LIMIT" > results.json
           cat results.json
+          echo ""
 
-      - name: 选择下载目标
+      - name: 检查结果并选择下载
         id: select
         run: |
           python3 -c "
-          import json
+          import json, sys
           with open('results.json') as f:
               data = json.load(f)
-          idx = int('${{ env.DOWNLOAD_INDEX }}') - 1
-          if data['results'] and 0 <= idx < len(data['results']):
-              target = data['results'][idx]
-              print(f'MD5={target[\"md5\"]}')
-              print(f'TITLE={target[\"title\"]}')
+          results = data.get('results', [])
+          count = len(results)
+          print(f'搜索结果: {count} 条')
+          
+          if count == 0:
+              print('未找到任何结果')
               with open('target_info.json', 'w') as f:
-                  json.dump(target, f)
-          else:
-              print('ERROR=未找到结果')
-              exit(1)
-          " >> $GITHUB_OUTPUT
+                  json.dump({'error': 'no_results'}, f)
+              sys.exit(0)
+          
+          idx = int('${{ env.DOWNLOAD_INDEX }}') - 1
+          if idx < 0 or idx >= count:
+              idx = 0
+          
+          target = results[idx]
+          print(f'选择第{idx+1}个: {target.get(\"title\",\"?\")}')
+          print(f'MD5: {target.get(\"md5\",\"?\")}')
+          print(f'大小: {target.get(\"size\",\"?\")}')
+          
+          with open('target_info.json', 'w') as f:
+              json.dump(target, f)
+          "
 
       - name: 下载文件
-        id: download
+        if: success() && hashFiles('target_info.json') != ''
+        run: |
+          python3 -c "
+          import json, os
+          with open('target_info.json') as f:
+              target = json.load(f)
+          if 'md5' in target and target['md5']:
+              md5 = target['md5']
+              print(f'开始下载: {md5}')
+              os.makedirs('downloads', exist_ok=True)
+              import subprocess
+              r = subprocess.run(['python3', 'scripts/libgen_search.py', 'dl', md5, 'downloads/'], 
+                               capture_output=True, text=True)
+              print(r.stdout)
+              if r.returncode != 0:
+                  print(f'错误: {r.stderr}')
+          else:
+              print('无下载目标')
+          "
+
+      - name: 保存搜索结果
         run: |
           mkdir -p downloads
-          python3 scripts/libgen_search.py dl "${{ steps.select.outputs.MD5 }}" downloads/
-
-      - name: 保存搜索结果 JSON
-        run: |
-          cp results.json downloads/results.json
-          cp target_info.json downloads/target_info.json
+          cp results.json downloads/ 2>/dev/null || true
+          cp target_info.json downloads/ 2>/dev/null || true
 
       - name: 上传 Artifact
         uses: actions/upload-artifact@v4
